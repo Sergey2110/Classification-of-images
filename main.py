@@ -100,6 +100,23 @@ class Classification:
         self.data_df = pd.read_csv(PATH_TRAIN)
         # self.data_df.head(3)
 
+        # разделим датасет на трейн и валидацию, чтобы смотреть на качество
+        self.train_df, self.valid_df = train_test_split(self.data_df, test_size=0.2, random_state=43)
+        train_dataset = ImageDataset(self.train_df, self.train_transform)
+        valid_dataset = ImageDataset(self.valid_df, self.valid_transform)
+
+        self.train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
+                                                   batch_size=32,
+                                                   shuffle=True,
+                                                   pin_memory=True,
+                                                   num_workers=2)
+
+        self.valid_loader = torch.utils.data.DataLoader(dataset=valid_dataset,
+                                                   batch_size=32,
+                                                   # shuffle=True,
+                                                   pin_memory=True,
+                                                   num_workers=2)
+
 
     def crossvalid(self, res_model=None, criterion=None, optimizer=None, dataset=None, k_fold=5):
         train_score = pd.Series()
@@ -165,7 +182,7 @@ class Classification:
         val_acc_log = []
 
         for epoch in tqdm(range(NUM_EPOCH)):
-            model.train()
+            self.model.train()
             train_loss = 0.
             train_size = 0
 
@@ -177,7 +194,7 @@ class Classification:
                 imgs = imgs.cuda()
                 labels = labels.cuda()
 
-                y_pred = model(imgs)
+                y_pred = self.model(imgs)
 
                 loss = criterion(y_pred, labels)
                 loss.backward()
@@ -193,14 +210,14 @@ class Classification:
             val_loss = 0.
             val_size = 0
             val_pred = 0.
-            model.eval()
+            self.model.eval()
 
             with torch.no_grad():
                 for imgs, labels in test_dataloader:
                     imgs = imgs.cuda()
                     labels = labels.cuda()
 
-                    pred = model(imgs)
+                    pred = self.model(imgs)
                     loss = criterion(pred, labels)
 
                     val_loss += loss.item()
@@ -222,44 +239,23 @@ class Classification:
 
 
     def watch_img(self):
-        global data_df
-
         # посмотрим на картинки. Не забудем указать корретный путь до папки
-        sns.countplot(x="class", data=data_df)
+        sns.countplot(x="class", data=self.data_df)
         fig, axs = plt.subplots(2, 4, figsize=(16, 8))
         fig.suptitle(f'Автомобиль {" "*105} Кран', fontsize=14)
 
-        for i, name in zip(range(4), data_df[data_df['class'] == 1].sample(4, random_state=42)['ID_img']):
+        for i, name in zip(range(4), self.data_df[self.data_df['class'] == 1].sample(4, random_state=42)['ID_img']):
               img = plt.imread(DIR_TRAIN + f"{name}")
               axs[i // 2, (i % 2)].imshow(img)
               axs[i // 2, (i % 2)].axis('off')
 
-        for i, name in zip(range(4), data_df[data_df['class'] == 0].sample(4, random_state=42)['ID_img']):
+        for i, name in zip(range(4), self.data_df[self.data_df['class'] == 0].sample(4, random_state=42)['ID_img']):
               img = plt.imread(DIR_TRAIN + f"{name}")
               axs[i // 2, (i % 2)+2].imshow(img)
               axs[i // 2, (i % 2)+2].axis('off')
 
         fig.tight_layout()
         fig.subplots_adjust(top=0.88)
-
-
-    def generate_dataset(self):
-        # разделим датасет на трейн и валидацию, чтобы смотреть на качество
-        train_df, valid_df = train_test_split(data_df, test_size=0.2, random_state=43)
-        train_dataset = ImageDataset(train_df, self.train_transform)
-        valid_dataset = ImageDataset(valid_df, self.valid_transform)
-
-        train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
-                                                   batch_size=32,
-                                                   shuffle=True,
-                                                   pin_memory=True,
-                                                   num_workers=2)
-
-        valid_loader = torch.utils.data.DataLoader(dataset=valid_dataset,
-                                                   batch_size=32,
-                                                   # shuffle=True,
-                                                   pin_memory=True,
-                                                   num_workers=2)
 
 
     def train_model(self):
@@ -274,12 +270,12 @@ class Classification:
                                                                          self.train_loader,
                                                                          self.valid_loader,
                                                                          15)
-        model.eval()
         return train_loss_log, train_acc_log, val_loss_log, val_acc_log
 
 
     def evaluation_model(self):
         valid_predicts = []
+        self.model.eval()
         for imgs, _ in tqdm(self.valid_loader):
             imgs = imgs.cuda()
             pred = self.model(imgs)
@@ -317,6 +313,7 @@ class Classification:
 
 
 if __name__ == '__main__':
-    train_model()
-    evaluation_model()
-    create_submit()
+    classif = Classification()
+    acc_loss = classif.train_model()
+    classif.evaluation_model()
+    classif.create_submit()
