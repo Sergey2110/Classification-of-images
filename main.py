@@ -23,12 +23,10 @@ import warnings
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 warnings.simplefilter('ignore')
 
-DIR_TRAIN = "/train/"
-DIR_TEST = "/test/"
-PATH_TRAIN = "/train/train.csv"
-PATH_TEST = "/test/test.csv"
-print("Обучающей выборки ", len(listdir(DIR_TRAIN)))
-print("Тестовой выборки ", len(listdir(DIR_TEST)))
+DIR_TRAIN = "train/"
+DIR_TEST = "test/"
+PATH_TRAIN = "train/train2.csv"
+PATH_TEST = "test/test2.csv"
 
 class ImageDataset(Dataset):
     def __init__(self, data_df, transform=None):
@@ -79,6 +77,9 @@ class TestImageDataset(Dataset):
 
 class Classification:
     def __init__(self):
+        print("Обучающей выборки ", len(listdir(DIR_TRAIN)))
+        print("Тестовой выборки ", len(listdir(DIR_TEST)))
+
         gc.collect()
         # задаем преобразование изображения.
         self.train_transform = transforms.Compose([
@@ -106,16 +107,21 @@ class Classification:
         valid_dataset = ImageDataset(self.valid_df, self.valid_transform)
 
         self.train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
-                                                   batch_size=32,
+                                                   batch_size=2,
                                                    shuffle=True,
                                                    pin_memory=True,
                                                    num_workers=2)
 
         self.valid_loader = torch.utils.data.DataLoader(dataset=valid_dataset,
-                                                   batch_size=32,
+                                                   batch_size=1,
                                                    # shuffle=True,
                                                    pin_memory=True,
                                                    num_workers=2)
+
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+        self.dict_acc_for_batch = {"train": {}, "test": {}}
+        self.dict_loss_for_batch = {"train": {}, "test": {}}
 
 
     def crossvalid(self, res_model=None, criterion=None, optimizer=None, dataset=None, k_fold=5):
@@ -174,7 +180,7 @@ class Classification:
         plt.show()
 
 
-    def train(self, res_model, criterion, optimizer, train_dataloader, test_dataloader, NUM_EPOCH=15):
+    def train(self, res_model, criterion, optimizer, train_dataloader, test_dataloader, NUM_EPOCH=15, show_img=False):
         train_loss_log = []
         val_loss_log = []
 
@@ -188,11 +194,13 @@ class Classification:
 
             train_pred = 0.
 
+            print("train")
             for imgs, labels in train_dataloader:
                 optimizer.zero_grad()
+                # print(labels)
 
-                imgs = imgs.cuda()
-                labels = labels.cuda()
+                imgs = imgs.to(self.device)
+                labels = labels.to(self.device)
 
                 y_pred = self.model(imgs)
 
@@ -205,17 +213,29 @@ class Classification:
                 train_pred += (y_pred.argmax(1) == labels).sum()
                 optimizer.step()
 
+            train_loss_log.append(train_loss / train_size)
             train_acc_log.append(train_pred / train_size)
+
+            self.dict_loss_for_batch["train"].update({epoch: train_loss_log[:]})
+            self.dict_acc_for_batch["train"].update({epoch: train_acc_log[:]})
+
+            # if show_img and epoch > (epoch - 2) and train_pred / train_size < 0.9:
+            #     for j in range(4):
+            #         show_input(imgs[j].cpu(),
+            #                    title=f"{labels[j]} {list_file[list_index_val[j + i * batch_size_v]][0]}")
+            #         print(f" epoch = {epoch} acc = {(train_pred / train_size) / batch_size_v}")
 
             val_loss = 0.
             val_size = 0
             val_pred = 0.
             self.model.eval()
 
+            print("test")
             with torch.no_grad():
                 for imgs, labels in test_dataloader:
-                    imgs = imgs.cuda()
-                    labels = labels.cuda()
+                    imgs = imgs.to(self.device)
+                    labels = labels.to(self.device)
+                    print(labels)
 
                     pred = self.model(imgs)
                     loss = criterion(pred, labels)
@@ -226,6 +246,9 @@ class Classification:
 
             val_loss_log.append(val_loss / val_size)
             val_acc_log.append(val_pred / val_size)
+
+            self.dict_loss_for_batch["test"].update({epoch: val_loss_log[:]})
+            self.dict_acc_for_batch["test"].update({epoch: val_acc_log[:]})
 
             clear_output()
             self.plot_history(train_loss_log, val_loss_log, 'loss')
@@ -259,17 +282,17 @@ class Classification:
 
 
     def train_model(self):
-        model = models.resnet152(pretrained=True)
-        model.fc = nn.Linear(2048, 8)
-        model = model.cuda()
+        self.model = models.resnet152(pretrained=True)
+        self.model.fc = nn.Linear(2048, 8)
+        self.model = self.model.to(self.device)
         criterion = torch.nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.fc.parameters(), lr=0.001)
-        train_loss_log, train_acc_log, val_loss_log, val_acc_log = self.train(model,
+        optimizer = torch.optim.Adam(self.model.fc.parameters(), lr=0.01)
+        train_loss_log, train_acc_log, val_loss_log, val_acc_log = self.train(self.model,
                                                                          criterion,
                                                                          optimizer,
                                                                          self.train_loader,
                                                                          self.valid_loader,
-                                                                         15)
+                                                                         5)
         return train_loss_log, train_acc_log, val_loss_log, val_acc_log
 
 
@@ -277,7 +300,7 @@ class Classification:
         valid_predicts = []
         self.model.eval()
         for imgs, _ in tqdm(self.valid_loader):
-            imgs = imgs.cuda()
+            imgs = imgs.to(self.device)
             pred = self.model(imgs)
             pred_numpy = pred.cpu().detach().numpy()
             for class_obj in pred_numpy:
@@ -301,7 +324,7 @@ class Classification:
         self.model.eval()
         predicts = []
         for imgs in tqdm(self.test_loader):
-            imgs = imgs.cuda()
+            imgs = imgs.to(self.device)
             pred = self.model(imgs)
             for class_obj in pred:
                 index, max_value = max(enumerate(class_obj), key=lambda i_v: i_v[1])
