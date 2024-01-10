@@ -1,12 +1,31 @@
 import os
+import time
 import warnings
-from lib.Classification import Classification
+from lib.Classification import ClassificationImage
 
-os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-warnings.simplefilter('ignore')
+if __name__ == "__main__":
+    classification = ClassificationImage()
+    start = time.time()
+    train_loss_log, train_acc_log, val_loss_log, val_acc_log, metrics_file_train, metrics_file_valid = classification.crossvalid(num_epoch=3)
+    print(f'{(time.time() - start)//60:.0f}мин {(time.time() - start)%50:.0f}с')
+    classification.plot_history(train_loss_log, val_loss_log)
+    classification.plot_history(train_acc_log, val_acc_log, 'Верность(accuracy)')
 
-if __name__ == '__main__':
-    classification = Classification()
-    acc_loss = classification.train_model()
+    classification.watch_dataframe(metrics_file_train, True)
+    classification.watch_dataframe(metrics_file_valid, True)
+
+    classification.visual_filters()
+    classification.visual_maps()
+
+    # 0 - автокран
+    # 1 - легковой автомобиль
+    # 2 - экскаватор
+    # 3 - человек
+    # 4 - самосвал
+    # 5 - карьерный погрузчик
+    # 6 - каток
+    # 7 - бульдозер
+
+    classification.watch_img()
     classification.evaluation_model()
-    classification.create_submit()
+    classification.save_model("model_param.pt")
