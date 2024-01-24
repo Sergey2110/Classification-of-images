@@ -6,6 +6,7 @@ from torch.utils.data import Dataset
 DIR_TRAIN = "train/"
 DIR_TEST = "test/"
 
+
 class ImageDataset(Dataset):
     def __init__(self, data_df, transform=None):
         self.data_df = data_df
@@ -25,6 +26,7 @@ class ImageDataset(Dataset):
 
     def __len__(self):
         return len(self.data_df)
+
 
 class TestImageDataset(Dataset):
     def __init__(self, data_df, transform=None):

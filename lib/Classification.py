@@ -7,18 +7,22 @@ import pandas as pd
 import seaborn as sns
 import torch
 import torch.nn as nn
+import torch.onnx
 import torch.optim as optim
 import warnings
 
-from ImageDataset import ImageDataset, TestImageDataset
 from IPython.display import display, HTML
+from onnxruntime.quantization import QuantFormat, QuantType, quantize_static
 from sklearn.metrics import recall_score
 from sklearn.model_selection import KFold, train_test_split
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.dataset import Subset
 from torchvision import models, transforms
 from tqdm import tqdm
-from typing import List
+from typing import List, Tuple
+
+from ResNetDataReader import ResNetDataReader
+from ImageDataset import ImageDataset, TestImageDataset
 
 DIR_TRAIN = "train/"
 DIR_TEST = "test/"
@@ -27,6 +31,9 @@ PATH_TEST = "test/test2.csv"
 
 
 class ClassificationImage:
+    """
+    Классификация изображений
+    """
     def __init__(self):
         """Инициализация модели и её параметров
         Parameters
@@ -66,10 +73,18 @@ class ClassificationImage:
         self.num_workers = 8  # количество процессов для загрузки данных
         self.scheduler_step_size = 1  # период уменьшения скорости обучения
         self.optimizer_lr = 0.01  # скорость обучения алгоритма Adam
+
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.model = models.resnet152(pretrained=True)
+        self.model.fc = nn.Linear(2048, 8)
+        self.model = self.model.to(self.device)
+        self.criterion = torch.nn.CrossEntropyLoss()
+        self.optimizer = torch.optim.Adam(self.model.fc.parameters(), lr=self.optimizer_lr)
+        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=self.scheduler_step_size)
 
         self.data_df = pd.read_csv(PATH_TRAIN)
 
+        self.test_df = None
         self.train_df, self.valid_df = train_test_split(self.data_df, test_size=0.2)
         train_dataset = ImageDataset(self.train_df, self.train_transform)
         valid_dataset = ImageDataset(self.valid_df, self.valid_transform)
@@ -102,7 +117,7 @@ class ClassificationImage:
         torch.backends.cudnn.deterministic = True
         np.random.seed(seed)
 
-    def plot_history(self, train_history: List[float], val_history: List[float], title: str = 'Потери'):
+    def plot_history(self, train_history: List[float], val_history: List[float], title: str = 'Потери (loss)') -> None:
         """График верности (accuracy) и потери (loss)
         Parameters
         ----------
@@ -129,7 +144,7 @@ class ClassificationImage:
         plt.grid()
         plt.show()
 
-    def watch_dataframe(self, data: pd.DataFrame, show_error: bool = False):
+    def watch_dataframe(self, data: pd.DataFrame, show_error: bool = False) -> None:
         """Удобный просмотр таблиц DataFrame
         Parameters
         ----------
@@ -149,7 +164,7 @@ class ClassificationImage:
             data_temp = data[data["Предсказанный.\\nкласс"] != data["Истинный класс"]]
         display(HTML(data_temp.to_html().replace("\\n", "<br>")))
 
-    def watch_img(self):
+    def watch_img(self) -> None:
         """Просмотр изображений
         Parameters
         ----------
@@ -180,7 +195,7 @@ class ClassificationImage:
         fig.tight_layout()
         fig.subplots_adjust(top=0.88)
 
-    def crossvalid(self, n_splits: int = 4, num_epoch: int = 10):
+    def crossvalid(self, n_splits: int = 4, num_epoch: int = 10) -> Tuple[List[float], List[float], List[float], List[float], pd.DataFrame, pd.DataFrame]:
         """Кроссвалидация
         Parameters
         ----------
@@ -208,12 +223,6 @@ class ClassificationImage:
         train_recall, val_recall = [], []
         metrics_file_train, metrics_file_valid = pd.DataFrame(), pd.DataFrame()
 
-        self.model = models.resnet152(pretrained=True)
-        self.model.fc = nn.Linear(2048, 8)
-        self.model = self.model.to(self.device)
-        criterion = torch.nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(self.model.fc.parameters(), lr=self.optimizer_lr)
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=self.scheduler_step_size)
         kf = KFold(n_splits)
         cros_dataset = ImageDataset(self.data_df, self.train_transform)
 
@@ -233,14 +242,14 @@ class ClassificationImage:
                 train_classes.clear()
                 valid_classes.clear()
 
-                scheduler.step()
+                self.scheduler.step()
                 for imgs, labels, image_name in train_dataloader:
-                    optimizer.zero_grad()
+                    self.optimizer.zero_grad()
                     imgs = imgs.to(self.device)
                     labels = labels.to(self.device)
                     pred_train = self.model(imgs)
 
-                    loss = criterion(pred_train, labels)
+                    loss = self.criterion(pred_train, labels)
                     loss.backward()
 
                     train_size += pred_train.size(0)
@@ -248,7 +257,7 @@ class ClassificationImage:
                     train_loss_log_for_batch.append(loss.data / pred_train.size(0))
                     train_pred += (pred_train.argmax(1) == labels).sum()
                     train_acc_log_for_batch.append(train_pred / pred_train.size(0))
-                    optimizer.step()
+                    self.optimizer.step()
 
                     for i in range(pred_train.size(0)):
                         metrics_file_temp = pd.DataFrame({"№ эпохи": [epoch],
@@ -286,7 +295,7 @@ class ClassificationImage:
                         imgs = imgs.to(self.device)
                         labels = labels.to(self.device)
                         pred_valid = self.model(imgs)
-                        loss = criterion(pred_valid, labels)
+                        loss = self.criterion(pred_valid, labels)
 
                         val_size += pred_valid.size(0)
                         val_loss += loss.item()
@@ -331,7 +340,7 @@ class ClassificationImage:
 
         return train_loss_log, train_acc_log, val_loss_log, val_acc_log, metrics_file_train, metrics_file_valid
 
-    def train(self, num_epoch: int = 10):
+    def train(self, num_epoch: int = 10) -> Tuple[List[float], List[float], List[float], List[float], pd.DataFrame, pd.DataFrame]:
         """Обычная тренировка модели
         Parameters
         ----------
@@ -356,13 +365,6 @@ class ClassificationImage:
         train_recall, val_recall = [], []
         metrics_file_train, metrics_file_valid = pd.DataFrame(), pd.DataFrame()
 
-        self.model = models.resnet152(pretrained=True)
-        self.model.fc = nn.Linear(2048, 8)
-        self.model = self.model.to(self.device)
-        criterion = torch.nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(self.model.fc.parameters(), lr=self.optimizer_lr)
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=self.scheduler_step_size)
-
         for epoch in tqdm(range(num_epoch)):
             self.model.train()
             train_loss = 0.
@@ -371,14 +373,14 @@ class ClassificationImage:
             valid_predicts.clear()
             train_predicts.clear()
 
-            scheduler.step()
+            self.scheduler.step()
             for imgs, labels, image_name in self.train_loader:
-                optimizer.zero_grad()
+                self.optimizer.zero_grad()
 
                 imgs = imgs.to(self.device)
                 labels = labels.to(self.device)
                 pred_train = self.model(imgs)
-                loss = criterion(pred_train, labels)
+                loss = self.criterion(pred_train, labels)
                 loss.backward()
 
                 train_size += pred_train.size(0)
@@ -386,7 +388,7 @@ class ClassificationImage:
                 train_loss_log_for_batch.append(loss.data / pred_train.size(0))
                 train_pred += (pred_train.argmax(1) == labels).sum()
                 train_acc_log_for_batch.append(train_pred / pred_train.size(0))
-                optimizer.step()
+                self.optimizer.step()
 
                 for i in range(pred_train.size(0)):
                     metrics_file_temp = pd.DataFrame({"№ эпохи": [epoch],
@@ -422,7 +424,7 @@ class ClassificationImage:
                     imgs = imgs.to(self.device)
                     labels = labels.to(self.device)
                     pred_valid = self.model(imgs)
-                    loss = criterion(pred_valid, labels)
+                    loss = self.criterion(pred_valid, labels)
 
                     val_size += pred_valid.size(0)
                     val_loss += loss.item()
@@ -472,7 +474,7 @@ class ClassificationImage:
 
         return train_loss_log, train_acc_log, val_loss_log, val_acc_log, metrics_file_train, metrics_file_valid
 
-    def visual_filters(self):
+    def visual_filters(self) -> None:
         """Визуализация фильтров сверточного слоя
         Parameters
         ----------
@@ -508,7 +510,7 @@ class ClassificationImage:
             plt.axis('off')
         plt.show()
 
-    def visual_maps(self):
+    def visual_maps(self) -> None:
         """Визуализация карт объектов
         Parameters
         ----------
@@ -565,7 +567,7 @@ class ClassificationImage:
         plt.show()
         plt.close()
 
-    def evaluation_model(self):
+    def evaluation_model(self) -> None:
         """Результаты на тестах
         Parameters
         ----------
@@ -582,14 +584,14 @@ class ClassificationImage:
 
         self.test_df = pd.read_csv(PATH_TEST)
         self.test_df = self.test_df.drop(["class"], axis=1)
-        self.test_dataset = TestImageDataset(self.test_df, self.valid_transform)
-        self.test_loader = torch.utils.data.DataLoader(dataset=self.test_dataset,
-                                                       batch_size=self.batch_test_size,
-                                                       shuffle=True,
-                                                       num_workers=self.num_workers)
+        test_dataset = TestImageDataset(self.test_df, self.valid_transform)
+        test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
+                                                  batch_size=self.batch_test_size,
+                                                  shuffle=True,
+                                                  num_workers=self.num_workers)
 
         self.model.eval()
-        for imgs in tqdm(self.test_loader):
+        for imgs in tqdm(test_loader):
             imgs = imgs.to(self.device)
             pred_test = self.model(imgs)
             for class_obj in pred_test:
@@ -599,7 +601,7 @@ class ClassificationImage:
         self.test_df["class"] = predicts
         self.test_df.head()
 
-    def create_submit(self, name_file: str = "submit.csv"):
+    def create_submit(self, name_file: str = "submit.csv") -> None:
         """Сохранение результатов тестов
         Parameters
         ----------
@@ -614,8 +616,40 @@ class ClassificationImage:
 
         self.test_df.to_csv(name_file, index=False)
 
-    def save_model(self, path: str = "model_param.pt"):
-        """Сохранение весов модели
+    def quantize_model(self, input_model_path: str = "ImageClassifier.onnx",
+                       output_model_path: str = "ImageClassifier.quant.onnx") -> None:
+        """Оптимизация (квантизация) модели классификации
+        Parameters
+        ----------
+        input_model_path: str
+            путь файла неквантованной модели в формате ONNX
+
+        output_model_path: str
+            путь файла для сохранения квантованной модели в формате ONNX
+
+        Returns
+        -------
+        None - ничего не возвращает
+
+        """
+
+        dr = ResNetDataReader(
+            DIR_TRAIN, input_model_path
+        )
+
+        quantize_static(input_model_path, output_model_path, dr,
+                        quant_format=QuantFormat.QDQ,
+                        per_channel=False,
+                        weight_type=QuantType.QInt8,
+        )
+        print("Откалиброванная и квантованная модель сохранена")
+        print("Модель до оптимизации (квантизации)")
+        dr.benchmark(input_model_path)
+        print("Модель после оптимизации (квантизации)")
+        dr.benchmark(output_model_path)
+
+    def save_model(self, path: str = "ImageClassifier.pt") -> None:
+        """Сохранение модели
         Parameters
         ----------
         path: str
@@ -627,9 +661,10 @@ class ClassificationImage:
 
         """
 
+        self.model.eval()
         torch.save(self.model.state_dict(), path)
 
-    def load_model(self, path: str = "model_param.pt"):
+    def load_model(self, path: str = "ImageClassifier.pt") -> None:
         """Загрузка весов модели
         Parameters
         ----------
@@ -643,3 +678,25 @@ class ClassificationImage:
         """
 
         self.model.load_state_dict(torch.load(path))
+
+    def save_model_onnx(self, path: str = "ImageClassifier.onnx") -> None:
+        """Сохранение модели в ONNX
+        Parameters
+        ----------
+        path: str
+            путь для загрузки модели
+
+        Returns
+        -------
+        None - ничего не возвращает
+
+        """
+
+        self.model.eval()
+        input_tensor = torch.randn(1, 3, 224, 224)
+
+        torch.onnx.export(self.model.cpu(), input_tensor, path, export_params=True, opset_version=12,
+                          do_constant_folding=True, input_names=['Input'], output_names=['Output'],
+                          dynamic_axes={'modelInput': {0: 'batch_size'},
+                                        'modelOutput': {0: 'batch_size'}})
+        print('Модель была конвертирована в формат ONNX')
